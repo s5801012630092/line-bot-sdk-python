@@ -1,24 +1,40 @@
 # -*- coding: utf-8 -*-
-
-#  Licensed under the Apache License, Version 2.0 (the "License"); you may
-#  not use this file except in compliance with the License. You may obtain
-#  a copy of the License at
 #
-#       http://www.apache.org/licenses/LICENSE-2.0
+#     Author : Suphakit Annoppornchai
+#     Date   : Apr 5 2017
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
-#  WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
-#  License for the specific language governing permissions and limitations
-#  under the License.
+#          https://saixiii.ddns.net
+# 
+# Copyright (C) 2017  Suphakit Annoppornchai
+# 
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program.
 
 from __future__ import unicode_literals
 
-import errno
-import os
 import sys
+import os
+import json
+import errno
+import time
 import tempfile
+import logging
+from logging.handlers import RotatingFileHandler
+from logging import Formatter
+from time import strftime
 from argparse import ArgumentParser
+from kafka import KafkaProducer
+from kafka.errors import KafkaError
 
 from flask import Flask, request, abort
 
@@ -41,24 +57,62 @@ from linebot.models import (
 
 app = Flask(__name__)
 
+#-------------------------------------------------------------------------------
+#     G L O B A L    V A R I A B L E S
+#-------------------------------------------------------------------------------
+
+botname = 'Saixiii'
+botcall = '-'
+botlen  = len(botcall)
+
 # get channel_secret and channel_access_token from your environment variable
-channel_secret = os.getenv('LINE_CHANNEL_SECRET', None)
-channel_access_token = os.getenv('LINE_CHANNEL_ACCESS_TOKEN', None)
+channel_secret = 'a4830b56ff9e5d85c3ff4a67f2360ee1'
+channel_access_token = 'jibJtKouOP8/0UYtTRtlXcB70zzJlfKtBnCXH7m4OwgsEwRKezyI8/E8frwhWSUNtJ5efliVvp4eOCFyNksfrGCXAcsvVq7O8idF7dy1fesLrsrN0Nm4RGR1vkYxGSphrwhAHSFlm9kX7FYZmkxFTwdB04t89/1O/w1cDnyilFU='
+
+# Log file configuration
+static_tmp_path = os.path.join(os.path.dirname(__file__), 'static', 'content')
+chat_file = os.path.join(os.path.dirname(__file__), 'log', botname) + '.msg'
+log_file = os.path.join(os.path.dirname(__file__), 'log', botname) + '.log'
+log_size = 1024 * 1024 * 10
+log_backup = 50
+log_format = '[%(asctime)s] [%(levelname)s] - %(message)s'
+log_mode = logging.DEBUG
+
+# Kafka configuration
+kafka_topic = 'line-saixiii'
+kafka_ip = 'saixiii.ddns.net'
+kafka_port = '9092'
+
+#-------------------------------------------------------------------------------
+#     I N I T I A L    P R O G R A M
+#-------------------------------------------------------------------------------
+
 if channel_secret is None:
     print('Specify LINE_CHANNEL_SECRET as environment variable.')
-#    sys.exit(1)
+    sys.exit(1)
 if channel_access_token is None:
     print('Specify LINE_CHANNEL_ACCESS_TOKEN as environment variable.')
-#    sys.exit(1)
+    sys.exit(1)
 
-#line_bot_api = LineBotApi(channel_access_token)
-#handler = WebhookHandler(channel_secret)
+line_bot_api = LineBotApi(channel_access_token)
+handler = WebhookHandler(channel_secret)
 
-line_bot_api = LineBotApi('jibJtKouOP8/0UYtTRtlXcB70zzJlfKtBnCXH7m4OwgsEwRKezyI8/E8frwhWSUNtJ5efliVvp4eOCFyNksfrGCXAcsvVq7O8idF7dy1fesLrsrN0Nm4RGR1vkYxGSphrwhAHSFlm9kX7FYZmkxFTwdB04t89/1O/w1cDnyilFU=')
-handler = WebhookHandler('a4830b56ff9e5d85c3ff4a67f2360ee1')
+#-------------------------------------------------------------------------------
+#     F U N C T I O N S
+#-------------------------------------------------------------------------------
 
-static_tmp_path = os.path.join(os.path.dirname(__file__), 'static', 'tmp')
+# convert epoch date to date time
+def convert_epoch(epoch):
+  sec = float(epoch) / 1000
+  dt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(sec))
+  return str(dt)
 
+# Function check call bot
+def chkcall(msg):
+	if msg != None and msg[:botlen].lower() == botcall:
+		return True
+	else:
+		return False
 
 # function for create tmp dir for download content
 def make_static_tmp_dir():
@@ -69,8 +123,56 @@ def make_static_tmp_dir():
             pass
         else:
             raise
+            
+# Kafka - fuction producer create messages to topic
+def kafka_producer(event):
+    # create kafka producer instance
+    producer = KafkaProducer(bootstrap_servers=[kafka_ip + ':' + kafka_port],value_serializer=lambda v: json.dumps(v).encode('utf-8'),retries=5)
+    
+    # get MessageEvent data
+    msg_dict = dict()
+    msg_dict['replytoken'] = event.reply_token
+    msg_dict['timestamp'] = event.timestamp
+    msg_dict['datetime'] = convert_epoch(event.timestamp)
+    msg_dict['source'] = event.source.type
+    msg_dict['msg'] = event.message.type
+    
+    if isinstance(event.message, TextMessage):
+      msg_dict['content'] = event.message.text
+    
+    if isinstance(event.source, SourceUser):
+      profile = line_bot_api.get_profile(event.source.user_id)
+      msg_dict['id'] = profile.user_id
+      msg_dict['name'] = profile.display_name
+      app.logger.info('User - ' + msg_dict['name'] + ' : ' + msg_dict['content'])
+    elif isinstance(event.source, SourceGroup):
+    	msg_dict['id'] = event.source.group_id
+    	app.logger.info('Group - ' + msg_dict['id'] + ' : ' + msg_dict['content'])
+    elif isinstance(event.source, SourceRoom):
+    	msg_dict['id'] = event.source.room_id
+    	app.logger.info('Room - ' + msg_dict['id'] + ' : ' + msg_dict['content'])
+    
+    # convert dict to json
+    msg_json = json.dumps(msg_dict)
+    
+    # push message asynchronous
+    producer.send(kafka_topic, msg_json)
+    producer.flush()
+    #app.logger.debug(msg_json.decode('utf-8'))
 
 
+@app.before_first_request
+def setup_logging():
+    # add log handler
+    loghandler = RotatingFileHandler(log_file, maxBytes=log_size, backupCount=log_backup)
+    loghandler.setFormatter(Formatter(log_format))
+    loghandler.setLevel(log_mode)
+
+    app.logger.addHandler(loghandler)
+    app.logger.setLevel(log_mode)
+    
+    
+    
 @app.route("/callback", methods=['POST'])
 def callback():
     # get X-Line-Signature header value
@@ -78,8 +180,8 @@ def callback():
 
     # get request body as text
     body = request.get_data(as_text=True)
-    app.logger.info("Request body: " + body)
-
+    app.logger.debug("Request body: " + body)
+    
     # handle webhook body
     try:
         handler.handle(body, signature)
@@ -92,7 +194,8 @@ def callback():
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
     text = event.message.text
-
+    kafka_producer(event)
+    
     if text == 'profile':
         if isinstance(event.source, SourceUser):
             profile = line_bot_api.get_profile(event.source.user_id)
@@ -164,7 +267,7 @@ def handle_text_message(event):
         line_bot_api.reply_message(event.reply_token, template_message)
     elif text == 'imagemap':
         pass
-    else:
+    elif text[:1].lower() == '-':
         line_bot_api.reply_message(
             event.reply_token, TextSendMessage(text=event.message.text))
 
@@ -215,7 +318,7 @@ def handle_content_message(event):
     line_bot_api.reply_message(
         event.reply_token, [
             TextSendMessage(text='Save content.'),
-            TextSendMessage(text=request.host_url + os.path.join('static', 'tmp', dist_name))
+            TextSendMessage(text=request.host_url + os.path.join('static', 'content', dist_name))
         ])
 
 
@@ -266,5 +369,5 @@ if __name__ == "__main__":
 
     # create tmp dir for download content
     make_static_tmp_dir()
-
+    
     app.run(debug=options.debug, port=options.port)
